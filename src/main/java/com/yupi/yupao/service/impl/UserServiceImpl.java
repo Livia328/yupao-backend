@@ -3,19 +3,28 @@ package com.yupi.yupao.service.impl;
 import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
 import com.google.gson.Gson;
-import com.google.gson.TypeAdapter;
 import com.google.gson.reflect.TypeToken;
+import com.yupi.yupao.common.BaseResponse;
 import com.yupi.yupao.common.ErrorCode;
+import com.yupi.yupao.common.ResultUtils;
 import com.yupi.yupao.constant.UserConstant;
 import com.yupi.yupao.exception.BusinessException;
 import com.yupi.yupao.model.domain.User;
-import com.yupi.yupao.model.vo.UserVO;
+import com.yupi.yupao.model.vo.TagVo;
+import com.yupi.yupao.model.vo.UserForgetRequest;
+import com.yupi.yupao.model.vo.UserSendMessage;
 import com.yupi.yupao.service.UserService;
 import com.yupi.yupao.mapper.UserMapper;
 import com.yupi.yupao.utils.AlgorithmUtils;
+import com.yupi.yupao.utils.ValidateCodeUtils;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.commons.math3.util.Pair;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.data.redis.core.RedisTemplate;
+import org.springframework.data.redis.core.ValueOperations;
+import org.springframework.mail.SimpleMailMessage;
+import org.springframework.mail.javamail.JavaMailSender;
 import org.springframework.stereotype.Service;
 import org.springframework.util.CollectionUtils;
 import org.springframework.util.DigestUtils;
@@ -23,10 +32,10 @@ import org.springframework.util.DigestUtils;
 import javax.annotation.Resource;
 import javax.servlet.http.HttpServletRequest;
 import java.util.*;
+import java.util.concurrent.TimeUnit;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
-import java.util.stream.Stream;
 
 import static com.yupi.yupao.constant.UserConstant.USER_LOGIN_STATE;
 
@@ -43,35 +52,63 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User>
     @Resource
     private UserMapper userMapper;
 
+    //把yml配置的邮箱号赋值到from
+    @Value("${spring.mail.username}")
+    private String from;
+    //发送邮件需要的对象
+    @Resource
+    private JavaMailSender javaMailSender;
+
+    @Resource
+    private RedisTemplate<String, Object> redisTemplate;
+
     /**
      * 盐值，混淆密码
      */
     private static final String SALT = "yupi";
 
     @Override
-    public long userRegister(String userAccount, String userPassword, String checkPassword, String planetCode) {
+    public long userRegister(String userAccount, String userEmail, String code, String userPassword, String checkPassword, String planetCode) {
         // 1. 校验
         if (StringUtils.isAnyBlank(userAccount, userPassword, checkPassword, planetCode)) {
             throw new BusinessException(ErrorCode.PARAMS_ERROR, "参数为空");
         }
         if (userAccount.length() < 4) {
-            throw new BusinessException(ErrorCode.PARAMS_ERROR, "用户账号过短");
+            throw new BusinessException(ErrorCode.PARAMS_ERROR, "用户账号过短，应不小于4位");
         }
         if (userPassword.length() < 8 || checkPassword.length() < 8) {
-            throw new BusinessException(ErrorCode.PARAMS_ERROR, "用户密码过短");
+            throw new BusinessException(ErrorCode.PARAMS_ERROR, "用户密码过短，应不小于8位");
         }
-        if (planetCode.length() > 5) {
-            throw new BusinessException(ErrorCode.PARAMS_ERROR, "星球编号过长");
+        if (code.length() != 6) {
+            throw new BusinessException(ErrorCode.PARAMS_ERROR, "请输入6位验证码");
         }
+//        if (planetCode.length() > 5) {
+//            throw new BusinessException(ErrorCode.PARAMS_ERROR, "星球编号过长");
+//        }
         // 账户不能包含特殊字符
         String validPattern = "[`~!@#$%^&*()+=|{}':;',\\\\[\\\\].<>/?~！@#￥%……&*（）——+|{}【】‘；：”“’。，、？]";
         Matcher matcher = Pattern.compile(validPattern).matcher(userAccount);
         if (matcher.find()) {
-            return -1;
+            throw new BusinessException(ErrorCode.PARAMS_ERROR, "账号不能包含特殊字符");
         }
         // 密码和校验密码相同
         if (!userPassword.equals(checkPassword)) {
-            return -1;
+            throw new BusinessException(ErrorCode.PARAMS_ERROR, "密码和确认密码不一致");
+        }
+        // 获取缓存校验码
+        // 把发送的验证码再redis里存一个key
+        String redisKey = String.format("my:user:sendMessage:%s", userEmail);
+        ValueOperations<String, Object> valueOperations = redisTemplate.opsForValue();
+        log.info(redisKey);
+        UserSendMessage sendMessage = (UserSendMessage) valueOperations.get(redisKey);
+        if (!Optional.ofNullable(sendMessage).isPresent()) {
+            throw new BusinessException(ErrorCode.PARAMS_ERROR, "获取验证码失败!");
+        }
+        //比对验证码
+        String sendMessageCode = sendMessage.getCode();
+        log.info(sendMessageCode);
+        if (!code.equals(sendMessageCode)) {
+            throw new BusinessException(ErrorCode.PARAMS_ERROR, "验证码不匹配!");
         }
         // 账户不能重复
         QueryWrapper<User> queryWrapper = new QueryWrapper<>();
@@ -93,7 +130,10 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User>
         User user = new User();
         user.setUserAccount(userAccount);
         user.setUserPassword(encryptPassword);
+        user.setEmail(userEmail);
         user.setPlanetCode(planetCode);
+        String defaultUrl = "https://img1.baidu.com/it/u=1637179393,2329776654&fm=253&fmt=auto&app=138&f=JPEG?w=500&h=542";
+        user.setAvatarUrl(defaultUrl);
         boolean saveResult = this.save(user);
         if (!saveResult) {
             return -1;
@@ -102,22 +142,110 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User>
     }
 
     @Override
+    public BaseResponse<Boolean> sendMessage(UserSendMessage toEmail) {
+        String email = toEmail.getUserEmail();
+        if (StringUtils.isEmpty(email)) {
+            throw new BusinessException(ErrorCode.PARAMS_ERROR, "email为空");
+        }
+        String subject = "伙伴匹配系统";
+        String code = "";
+        //StringUtils.isNotEmpty字符串非空判断
+        if (StringUtils.isNotEmpty(email)) {
+            //发送一个四位数的验证码,把验证码变成String类型
+            code = ValidateCodeUtils.generateValidateCode(6).toString();
+            String text = "【伙伴匹配系统】您好，您的验证码为：" + code + "，请在5分钟内使用";
+            log.info("验证码为：" + code);
+            //发送短信
+            SimpleMailMessage message = new SimpleMailMessage();
+            message.setFrom(from);
+            message.setTo(email);
+            message.setSubject(subject);
+            message.setText(text);
+            //发送邮件
+            javaMailSender.send(message);
+            UserSendMessage userSendMessage = new UserSendMessage();
+            userSendMessage.setUserEmail(email);
+            userSendMessage.setCode(code);
+            // 作为唯一标识
+            String redisKey = String.format("my:user:sendMessage:%s", email);
+            ValueOperations<String, Object> valueOperations = redisTemplate.opsForValue();
+            // 写缓存
+            try {
+                valueOperations.set(redisKey, userSendMessage, 300000, TimeUnit.MILLISECONDS);
+                UserSendMessage sendMessage = (UserSendMessage) valueOperations.get(redisKey);
+                log.info(sendMessage.toString());
+                return ResultUtils.success(true);
+            } catch (Exception e) {
+                log.error("redis set key error", e);
+                throw new BusinessException(ErrorCode.SYSTEM_ERROR, "缓存失败!");
+            }
+        }
+        return ResultUtils.success(true);
+    }
+
+    @Override
+    public BaseResponse<Boolean> updatePassword(UserForgetRequest userForgetRequest) {
+        String email = userForgetRequest.getUserEmail();
+        String userPassword = userForgetRequest.getUserPassword();
+        String code = userForgetRequest.getCode();
+        String userAccount = userForgetRequest.getUserAccount();
+        // 1. 校验
+        if ((!Optional.ofNullable(email).isPresent()) || (!Optional.ofNullable(userPassword).isPresent())
+                || (!Optional.ofNullable(code).isPresent()) || (!Optional.ofNullable(userAccount).isPresent())) {
+            throw new BusinessException(ErrorCode.PARAMS_ERROR, "参数为空");
+        }
+
+        if (userPassword.length() < 8) {
+            throw new BusinessException(ErrorCode.PARAMS_ERROR, "用户密码过短，应不少于8位!");
+        }
+        String redisKey = String.format("my:user:sendMessage:%s", email);
+        ValueOperations<String, Object> valueOperations = redisTemplate.opsForValue();
+        log.info(redisKey);
+        UserSendMessage sendMessage = (UserSendMessage) valueOperations.get(redisKey);
+        if (!Optional.ofNullable(sendMessage).isPresent()) {
+            throw new BusinessException(ErrorCode.PARAMS_ERROR, "获取验证码失败!");
+        }
+        String sendMessageCode = sendMessage.getCode();
+        log.info(sendMessageCode);
+        if (!code.equals(sendMessageCode)) {
+            throw new BusinessException(ErrorCode.PARAMS_ERROR, "验证码不匹配!");
+        }
+        QueryWrapper<User> queryWrapper = new QueryWrapper<>();
+        queryWrapper.eq("email", email);
+        queryWrapper.eq("userAccount", userAccount);
+        User user = userMapper.selectOne(queryWrapper);
+        if (!Optional.ofNullable(user).isPresent()) {
+            throw new BusinessException(ErrorCode.PARAMS_ERROR, "该用户不存在!");
+        }
+        // 2. 加密
+        String encryptPassword = DigestUtils.md5DigestAsHex((SALT + userPassword).getBytes());
+        user.setUserPassword(encryptPassword);
+        int role = userMapper.updateById(user);
+        if (role > 0) {
+            return ResultUtils.success(true);
+        } else {
+            return ResultUtils.success(false);
+        }
+    }
+
+
+    @Override
     public User userLogin(String userAccount, String userPassword, HttpServletRequest request) {
         // 1. 校验
         if (StringUtils.isAnyBlank(userAccount, userPassword)) {
-            return null;
+            throw new BusinessException(ErrorCode.PARAMS_ERROR);
         }
         if (userAccount.length() < 4) {
-            return null;
+            throw new BusinessException(ErrorCode.PARAMS_ERROR);
         }
         if (userPassword.length() < 8) {
-            return null;
+            throw new BusinessException(ErrorCode.PARAMS_ERROR);
         }
         // 账户不能包含特殊字符
         String validPattern = "[`~!@#$%^&*()+=|{}':;',\\\\[\\\\].<>/?~！@#￥%……&*（）——+|{}【】‘；：”“’。，、？]";
         Matcher matcher = Pattern.compile(validPattern).matcher(userAccount);
         if (matcher.find()) {
-            return null;
+            throw new BusinessException(ErrorCode.PARAMS_ERROR);
         }
         // 2. 加密
         String encryptPassword = DigestUtils.md5DigestAsHex((SALT + userPassword).getBytes());
@@ -219,7 +347,7 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User>
         if (userId <= 0) {
             throw new BusinessException(ErrorCode.PARAMS_ERROR);
         }
-        // todo 补充校验，如果用户没有传任何要更新的值，就直接报错，不用执行 update 语句
+        // 如果用户没有传任何要更新的值，就直接报错，不用执行 update 语句
         // 如果是管理员，允许更新任意用户
         // 如果不是管理员，只允许更新当前（自己的）信息
         if (!isAdmin(loginUser) && userId != loginUser.getId()) {
@@ -322,6 +450,94 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User>
         }
         return finalUserList;
     }
+
+    @Override
+    public TagVo getTags(User currentUser, HttpServletRequest request) {
+        if (request == null) {
+            throw new BusinessException(ErrorCode.PARAMS_ERROR);
+        }
+        TagVo tagVo = new TagVo();
+//        log.info("id:" + id);
+//        String redisKey = String.format(USER_LOGIN_STATE + id);
+//        ValueOperations<String, Object> valueOperations = redisTemplate.opsForValue();
+//        User currentUser = (User) valueOperations.get(redisKey);
+        User userById = this.getById(currentUser.getId());
+        String OldTags = userById.getTags();
+        QueryWrapper<User> queryWrapper = new QueryWrapper<>();
+        queryWrapper.isNotNull("tags");
+        List<User> users = this.list(queryWrapper);
+        Map<String, Integer> map = new HashMap<>();
+        Gson gson = new Gson();
+        log.info(OldTags);
+        List<String> oldTags = gson.fromJson(OldTags, new TypeToken<List<String>>() {
+        }.getType());
+        log.info(oldTags.toString() + "");
+        for (User user : users) {
+            String Tags = user.getTags();
+            List<String> list = Arrays.asList(Tags);
+            if (list == null) {
+                continue;
+            }
+            List<String> tagList = gson.fromJson(Tags, new TypeToken<List<String>>() {
+            }.getType());
+            if (tagList != null) {
+                for (String tag : tagList) {
+                    if (map.get(tag) == null) {
+                        map.put(tag, 1);
+                    } else {
+                        map.put(tag, map.get(tag) + 1);
+                    }
+                }
+            }
+        }
+        Map<Integer, List<String>> Map = new TreeMap<>(new Comparator<Integer>() {
+            @Override
+            public int compare(Integer key1, Integer key2) {
+                //降序排序
+                return key2.compareTo(key1);
+            }
+        });
+        map.forEach((value, key) -> {
+            if (Map.size() == 0) {
+                Map.put(key, Arrays.asList(value));
+            } else if (Map.get(key) == null) {
+                Map.put(key, Arrays.asList(value));
+            } else {
+                List<String> list = new ArrayList(Map.get(key));
+                list.add(value);
+                Map.put(key, list);
+            }
+        });
+        Set<String> set = new HashSet<>();
+        for (Map.Entry<Integer, List<String>> entry : Map.entrySet()) {
+
+            log.info("set.size():"+set.size());
+            List<String> value = entry.getValue();
+            if (oldTags == null) {
+                for (String tag : value) {
+                    set.add(tag);
+                    if (set.size() >= 20) {
+                        break;
+                    }
+                }
+            }
+            for (String tag : value) {
+                if (!oldTags.contains(tag)) {
+                    set.add(tag);
+                    if (set.size() >= 20) {
+                        break;
+                    }
+                }
+            }
+        }
+
+        List<String> RecommendTags = new ArrayList<String>(set);
+        log.info("RecommendTags:"+RecommendTags);
+        tagVo.setOldTags(oldTags);
+        tagVo.setRecommendTags(RecommendTags);
+        return tagVo;
+    }
+
 
     /**
      * 根据标签搜索用户（SQL 查询版）

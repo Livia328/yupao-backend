@@ -1,16 +1,11 @@
-package com.yupi.yupao.model.request;
+package com.yupi.yupao.model.vo;
 
 import lombok.Data;
 
 import java.io.Serializable;
 
-/**
- * 用户注册请求体
- *
- * @author yupi
- */
 @Data
-public class UserRegisterRequest implements Serializable {
+public class UserForgetRequest implements Serializable {
 
     private static final long serialVersionUID = 3191241716373120793L;
 
@@ -22,5 +17,5 @@ public class UserRegisterRequest implements Serializable {
 
     private String userPassword;
 
-    private String checkPassword;
+
 }

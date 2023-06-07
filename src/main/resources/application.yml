@@ -24,6 +24,12 @@ spring:
     port: 6379
     host: localhost
     database: 1
+  mail:
+    host: smtp.qq.com
+    # QQ邮箱，这里为发件人，填自己的即可
+    username: 374606755@qq.com
+    # QQ邮箱授权码，进入QQ邮箱账号与安全，获得POP3服务
+    password: ygcdizasddvjbhjh
 server:
   port: 8080
   servlet:

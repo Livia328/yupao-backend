@@ -3,6 +3,9 @@ package com.yupi.yupao.service;
 import com.yupi.yupao.common.BaseResponse;
 import com.yupi.yupao.model.domain.User;
 import com.baomidou.mybatisplus.extension.service.IService;
+import com.yupi.yupao.model.vo.TagVo;
+import com.yupi.yupao.model.vo.UserForgetRequest;
+import com.yupi.yupao.model.vo.UserSendMessage;
 import com.yupi.yupao.model.vo.UserVO;
 
 import javax.servlet.http.HttpServletRequest;
@@ -24,7 +27,24 @@ public interface UserService extends IService<User> {
      * @param planetCode    星球编号
      * @return 新用户 id
      */
-    long userRegister(String userAccount, String userPassword, String checkPassword, String planetCode);
+
+    long userRegister(String userAccount, String userEmail, String code, String userPassword, String checkPassword, String planetCode);
+
+    /**
+     * 向用户邮箱发送验证码
+     * @param toEmail
+     * @return 返回信息
+     */
+
+    BaseResponse<Boolean> sendMessage(UserSendMessage toEmail);
+
+    /**
+     * 用户更改密码
+     * @param userForgetRequest
+     * @return
+     */
+    BaseResponse<Boolean> updatePassword(UserForgetRequest userForgetRequest);
+
 
     /**
      * 用户登录
@@ -96,4 +116,5 @@ public interface UserService extends IService<User> {
      * @return
      */
     List<User> matchUsers(long num, User loginUser);
+    TagVo getTags(User currentUser, HttpServletRequest request);
 }

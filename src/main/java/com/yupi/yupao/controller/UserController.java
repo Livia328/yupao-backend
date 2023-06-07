@@ -9,6 +9,9 @@ import com.yupi.yupao.exception.BusinessException;
 import com.yupi.yupao.model.domain.User;
 import com.yupi.yupao.model.request.UserLoginRequest;
 import com.yupi.yupao.model.request.UserRegisterRequest;
+import com.yupi.yupao.model.vo.TagVo;
+import com.yupi.yupao.model.vo.UserForgetRequest;
+import com.yupi.yupao.model.vo.UserSendMessage;
 import com.yupi.yupao.model.vo.UserVO;
 import com.yupi.yupao.service.UserService;
 import lombok.extern.slf4j.Slf4j;
@@ -20,6 +23,7 @@ import org.springframework.web.bind.annotation.*;
 
 import javax.annotation.Resource;
 import javax.servlet.http.HttpServletRequest;
+import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
@@ -46,6 +50,18 @@ public class UserController {
     @Resource
     private RedisTemplate<String, Object> redisTemplate;
 
+
+    @PostMapping("/sendMessage")
+    public BaseResponse<Boolean> sendMessage(@RequestBody UserSendMessage userSendMessage) {
+        log.info("userSendMessage:"+userSendMessage.toString());
+        return userService.sendMessage(userSendMessage);
+    }
+
+    @PutMapping("/forget")
+    public BaseResponse<Boolean> forget(@RequestBody UserForgetRequest userForgetRequest) {
+        return userService.updatePassword(userForgetRequest);
+    }
+
     @PostMapping("/register")
     public BaseResponse<Long> userRegister(@RequestBody UserRegisterRequest userRegisterRequest) {
         if (userRegisterRequest == null) {
@@ -53,12 +69,15 @@ public class UserController {
         }
         String userAccount = userRegisterRequest.getUserAccount();
         String userPassword = userRegisterRequest.getUserPassword();
+        String userEmail = userRegisterRequest.getUserEmail();
+        String code = userRegisterRequest.getCode();
         String checkPassword = userRegisterRequest.getCheckPassword();
-        String planetCode = userRegisterRequest.getPlanetCode();
-        if (StringUtils.isAnyBlank(userAccount, userPassword, checkPassword, planetCode)) {
+        String planetCode = String.valueOf(System.currentTimeMillis());
+        log.info(System.currentTimeMillis()+"时间");
+        if (StringUtils.isAnyBlank(userAccount,userEmail,code, userPassword, checkPassword, planetCode)) {
             return null;
         }
-        long result = userService.userRegister(userAccount, userPassword, checkPassword, planetCode);
+        long result = userService.userRegister(userAccount,userEmail,code, userPassword, checkPassword, planetCode);
         return ResultUtils.success(result);
     }
 
@@ -200,6 +219,33 @@ public class UserController {
         }
         User user = userService.getLoginUser(request);
         return ResultUtils.success(userService.matchUsers(num, user));
+    }
+
+    /**
+     * 获取当前用户的标签
+     * @param request
+     * @return
+     */
+    @PostMapping("/getTags")
+    public BaseResponse<TagVo> getTags(@RequestBody User user, HttpServletRequest request) {
+        TagVo tagVo = userService.getTags(user, request);
+        log.info(tagVo.toString());
+        return ResultUtils.success(tagVo);
+    }
+
+    /**
+     * 获取当前用户信息
+     * @param id
+     * @return
+     */
+    @GetMapping("/getNewUserInfo")
+    public BaseResponse<User> getNewUserInfo(String id) {
+        log.info("id:"+id);
+        if (CollectionUtils.isEmpty(Collections.singleton(id))) {
+            throw new BusinessException(ErrorCode.PARAMS_ERROR);
+        }
+        User user = userService.getById(id);
+        return ResultUtils.success(user);
     }
 
 }
